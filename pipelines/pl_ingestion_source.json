@@ -1,0 +1,324 @@
+{
+    "name": "pl_ingestion_source",
+    "objectId": "f0741426-467b-48b6-a424-06180edfa86f",
+    "properties": {
+        "activities": [
+            {
+                "name": "lookup_metadata",
+                "type": "Lookup",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "source": {
+                        "type": "DataWarehouseSource",
+                        "sqlReaderQuery": {
+                            "value": "DECLARE @cols AS NVARCHAR(MAX),\n        @query AS NVARCHAR(MAX);\n\nSELECT @cols = STRING_AGG(QUOTENAME(parameter_name), ',')\nFROM (SELECT DISTINCT parameter_name FROM lh_metadata.dbo.entity_parameters) AS distinctParams;\n\nSET @query = N'SELECT source_name, [entity_id], [entity_name], processing_type, ' + @cols + '\n             FROM (\n                 SELECT s.[name] AS source_name,\n                        e.id AS [entity_id],\n                        e.[name] AS [entity_name],\n                        e.processing_type,\n                        ep.parameter_name,\n                        ep.parameter_value\n                 FROM lh_metadata.dbo.source s\n                 JOIN lh_metadata.dbo.entity e ON s.id = e.source_id\n                 JOIN lh_metadata.dbo.entity_parameters ep ON e.id = ep.[entity_id]\n                 WHERE s.id = @{pipeline().parameters.source_id}\n             ) AS srcData\n             PIVOT (\n                 MAX(parameter_value)\n                 FOR parameter_name IN (' + @cols + ')\n             ) AS pivotTable\n             ORDER BY [entity_id];';\n             \nEXEC sp_executesql @query;\n",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "firstRowOnly": false,
+                    "datasetSettings": {
+                        "annotations": [],
+                        "linkedService": {
+                            "name": "wh_gold",
+                            "properties": {
+                                "annotations": [],
+                                "type": "DataWarehouse",
+                                "typeProperties": {
+                                    "endpoint": "{{endpoint}}",
+                                    "artifactId": "8dca9a85-c229-4bca-9dd6-979d693cb774",
+                                    "workspaceId": "{{workspaceId}}"
+                                }
+                            }
+                        },
+                        "type": "DataWarehouseTable",
+                        "schema": []
+                    }
+                }
+            },
+            {
+                "name": "foreach_entity",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "lookup_metadata",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('lookup_metadata').output.value",
+                        "type": "Expression"
+                    },
+                    "activities": [
+                        {
+                            "name": "processing_type",
+                            "type": "IfCondition",
+                            "dependsOn": [],
+                            "typeProperties": {
+                                "expression": {
+                                    "value": "@equals(item().processing_type, 'merge')",
+                                    "type": "Expression"
+                                },
+                                "ifFalseActivities": [
+                                    {
+                                        "name": "copydata_file_rebuild",
+                                        "type": "Copy",
+                                        "dependsOn": [],
+                                        "policy": {
+                                            "timeout": "0.12:00:00",
+                                            "retry": 0,
+                                            "retryIntervalInSeconds": 30,
+                                            "secureOutput": false,
+                                            "secureInput": false
+                                        },
+                                        "typeProperties": {
+                                            "source": {
+                                                "type": "RestSource",
+                                                "httpRequestTimeout": "00:01:40",
+                                                "requestInterval": "00.00:00:00.010",
+                                                "requestMethod": "GET",
+                                                "paginationRules": {
+                                                    "supportRFC5988": "true"
+                                                },
+                                                "datasetSettings": {
+                                                    "annotations": [],
+                                                    "type": "RestResource",
+                                                    "typeProperties": {
+                                                        "relativeUrl": {
+                                                            "value": "@item().api_query",
+                                                            "type": "Expression"
+                                                        }
+                                                    },
+                                                    "schema": [],
+                                                    "externalReferences": {
+                                                        "connection": "b3d09462-0956-458f-ac31-5d3a1bd26146"
+                                                    }
+                                                }
+                                            },
+                                            "sink": {
+                                                "type": "JsonSink",
+                                                "storeSettings": {
+                                                    "type": "LakehouseWriteSettings"
+                                                },
+                                                "formatSettings": {
+                                                    "type": "JsonWriteSettings"
+                                                },
+                                                "datasetSettings": {
+                                                    "annotations": [],
+                                                    "linkedService": {
+                                                        "name": "lh_bronze",
+                                                        "properties": {
+                                                            "annotations": [],
+                                                            "type": "Lakehouse",
+                                                            "typeProperties": {
+                                                                "workspaceId": "{{workspaceId}}",
+                                                                "artifactId": "eb1f75d2-195a-4d49-afc1-3a85ccdae062",
+                                                                "rootFolder": "Files"
+                                                            }
+                                                        }
+                                                    },
+                                                    "type": "Json",
+                                                    "typeProperties": {
+                                                        "location": {
+                                                            "type": "LakehouseLocation",
+                                                            "fileName": {
+                                                                "value": "@concat(item().entity_name, '.', item().sink_file_format)",
+                                                                "type": "Expression"
+                                                            },
+                                                            "folderPath": {
+                                                                "value": "@concat(item().sink_file_folder, '/', item().source_name, '/', item().entity_name)",
+                                                                "type": "Expression"
+                                                            }
+                                                        }
+                                                    },
+                                                    "schema": {}
+                                                }
+                                            },
+                                            "enableStaging": false
+                                        }
+                                    },
+                                    {
+                                        "name": "rebuild_append",
+                                        "type": "AppendVariable",
+                                        "dependsOn": [
+                                            {
+                                                "activity": "copydata_file_rebuild",
+                                                "dependencyConditions": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        ],
+                                        "typeProperties": {
+                                            "variableName": "entities_info",
+                                            "value": {
+                                                "value": "@json(concat('{\"entity_id\": ', item().entity_id, ', \"file_path\": \"abfss://dev_ws_teemu@onelake.dfs.fabric.microsoft.com/lh_bronze.Lakehouse/Files/', item().sink_file_folder, '/', item().source_name, '/', item().entity_name, '/', item().entity_name, '.', item().sink_file_format, '\"}'))\n",
+                                                "type": "Expression"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "ifTrueActivities": [
+                                    {
+                                        "name": "copydata_file_merge",
+                                        "type": "Copy",
+                                        "dependsOn": [],
+                                        "policy": {
+                                            "timeout": "0.12:00:00",
+                                            "retry": 0,
+                                            "retryIntervalInSeconds": 30,
+                                            "secureOutput": false,
+                                            "secureInput": false
+                                        },
+                                        "typeProperties": {
+                                            "source": {
+                                                "type": "RestSource",
+                                                "httpRequestTimeout": "00:01:40",
+                                                "requestInterval": "00.00:00:00.010",
+                                                "requestMethod": "GET",
+                                                "paginationRules": {
+                                                    "supportRFC5988": "true"
+                                                },
+                                                "datasetSettings": {
+                                                    "annotations": [],
+                                                    "type": "RestResource",
+                                                    "typeProperties": {
+                                                        "relativeUrl": {
+                                                            "value": "@item().api_query",
+                                                            "type": "Expression"
+                                                        }
+                                                    },
+                                                    "schema": [],
+                                                    "externalReferences": {
+                                                        "connection": "b3d09462-0956-458f-ac31-5d3a1bd26146"
+                                                    }
+                                                }
+                                            },
+                                            "sink": {
+                                                "type": "JsonSink",
+                                                "storeSettings": {
+                                                    "type": "LakehouseWriteSettings"
+                                                },
+                                                "formatSettings": {
+                                                    "type": "JsonWriteSettings"
+                                                },
+                                                "datasetSettings": {
+                                                    "annotations": [],
+                                                    "linkedService": {
+                                                        "name": "lh_bronze",
+                                                        "properties": {
+                                                            "annotations": [],
+                                                            "type": "Lakehouse",
+                                                            "typeProperties": {
+                                                                "workspaceId": "{{workspaceId}}",
+                                                                "artifactId": "eb1f75d2-195a-4d49-afc1-3a85ccdae062",
+                                                                "rootFolder": "Files"
+                                                            }
+                                                        }
+                                                    },
+                                                    "type": "Json",
+                                                    "typeProperties": {
+                                                        "location": {
+                                                            "type": "LakehouseLocation",
+                                                            "fileName": {
+                                                                "value": "@concat(item().entity_name, '_', formatDateTime(pipeline().TriggerTime, 'yyyyMMddHHmmss'), '.', item().sink_file_format)",
+                                                                "type": "Expression"
+                                                            },
+                                                            "folderPath": {
+                                                                "value": "@concat(item().sink_file_folder, '/', item().source_name, '/', item().entity_name, '/', utcNow('yyyy'), '/', utcNow('MM'), '/', utcNow('dd'))",
+                                                                "type": "Expression"
+                                                            }
+                                                        }
+                                                    },
+                                                    "schema": {}
+                                                }
+                                            },
+                                            "enableStaging": false
+                                        }
+                                    },
+                                    {
+                                        "name": "merge_append",
+                                        "type": "AppendVariable",
+                                        "dependsOn": [
+                                            {
+                                                "activity": "copydata_file_merge",
+                                                "dependencyConditions": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        ],
+                                        "typeProperties": {
+                                            "variableName": "entities_info",
+                                            "value": {
+                                                "value": "@json(concat('{\"entity_id\": ', item().entity_id, ', \"file_path\": \"abfss://dev_ws_teemu@onelake.dfs.fabric.microsoft.com/lh_bronze.Lakehouse/Files/', item().sink_file_folder, '/', item().source_name, '/', item().entity_name, '/', utcNow('yyyy'), '/', utcNow('MM'), '/', utcNow('dd'), '/', item().entity_name, '_', formatDateTime(pipeline().TriggerTime, 'yyyyMMddHHmmss'), '.', item().sink_file_format, '\"}'))\n",
+                                                "type": "Expression"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "load_bronze_silver",
+                "type": "TridentNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "foreach_entity",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "851064d6-a93e-483c-a4cd-282dcfc6d2d9",
+                    "workspaceId": "{{workspaceId}}",
+                    "parameters": {
+                        "entities_info": {
+                            "value": {
+                                "value": "@string(variables('entities_info'))",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "source_id": {
+                "type": "int",
+                "defaultValue": 1
+            }
+        },
+        "variables": {
+            "source_id": {
+                "type": "Integer"
+            },
+            "entities_info": {
+                "type": "Array"
+            }
+        },
+        "lastModifiedByObjectId": "{{lastModifiedByObjectId}}",
+        "lastPublishTime": "{{lastPublishTime}}"
+    }
+}
